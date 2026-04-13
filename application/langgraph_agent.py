@@ -740,8 +740,9 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
     return server_info
 
 async def run_langgraph_agent(query: str, mcp_servers: list, plugin_name: Optional[str]=None, history_mode: str="Disable", containers: Optional[dict]=None) -> tuple[str, list]:
-    chat.index = 0
-    chat.streaming_index = 0
+    queue = containers['queue'] if containers else None
+    if queue:
+        queue.reset()
 
     image_url = []
     references = []
@@ -780,8 +781,8 @@ async def run_langgraph_agent(query: str, mcp_servers: list, plugin_name: Option
     if not tools:
         logger.warning("No tools available, using general conversation mode")
         result = "MCP 설정을 확인하세요."
-        if containers is not None:
-            containers['notification'][0].markdown(result)
+        if queue:
+            queue.result(result)
         return result, image_url
     
     if history_mode == "Enable":
@@ -837,21 +838,19 @@ async def run_langgraph_agent(query: str, mcp_servers: list, plugin_name: Option
                                 toolUseId = content_item.get('id', '')
                                 tool_name = content_item.get('name', '')
                                 logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
-                                chat.streaming_index = chat.index
-                                chat.index += 1
+                                if queue:
+                                    queue.register_tool(toolUseId, tool_name)
                                                                     
                             if 'partial_json' in content_item:
                                 partial_json = content_item.get('partial_json', '')
-                                #logger.info(f"partial_json: {partial_json}")
                                 
                                 if toolUseId not in chat.tool_input_list:
                                     chat.tool_input_list[toolUseId] = ""                                
                                 chat.tool_input_list[toolUseId] += partial_json
                                 input = chat.tool_input_list[toolUseId]
-                                # logger.info(f"input: {input}")
 
-                                # logger.info(f"tool_name: {tool_name}, input: {input}, toolUseId: {toolUseId}")
-                                chat.update_streaming_result(containers, f"Tool: {tool_name}, Input: {input}", "info")
+                                if queue:
+                                    queue.tool_update(toolUseId, f"Tool: {tool_name}, Input: {input}")
                         
         elif isinstance(stream[0], ToolMessage):
             message = stream[0]
@@ -887,7 +886,6 @@ async def run_langgraph_agent(query: str, mcp_servers: list, plugin_name: Option
             ref += f"{i+1}. [{reference['title']}]({reference['url']}), {page_content}...\n"    
         result += ref
     
-    if containers is not None:
-        containers['notification'][chat.index].markdown(result)
+    chat.update_final_result(containers, result)
     
     return result, image_url
