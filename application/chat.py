@@ -579,20 +579,20 @@ def summarize_image(image_content, prompt, st):
 
     return contents
 
-def add_notification(containers, message):
-    if containers is not None:
-        containers['queue'].notify(message)
+def add_notification(notification_queue, message):
+    if notification_queue is not None:
+        notification_queue.notify(message)
 
-def update_streaming_result(containers, message, type="markdown"):
-    if containers is not None:
+def update_streaming_result(notification_queue, message, type="markdown"):
+    if notification_queue is not None:
         if type == "markdown":
-            containers['queue'].stream(message)
+            notification_queue.stream(message)
         elif type == "info":
-            containers['queue'].notify(message)
+            notification_queue.notify(message)
 
-def update_final_result(containers, message):
-    if containers is not None:
-        containers['queue'].result(message)
+def update_final_result(notification_queue, message):
+    if notification_queue is not None:
+        notification_queue.result(message)
 
 tool_input_list = dict()
 
