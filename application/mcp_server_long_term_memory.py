@@ -16,11 +16,7 @@ logger = logging.getLogger("memory")
 
 try:
     mcp = FastMCP(
-        name = "memory",
-        instructions=(
-            "You are a helpful assistant. "
-            "You can create, retrieve, list, get, and delete memories."
-        ),
+        name = "memory"
     )
     logger.info("MCP server initialized successfully")
 except Exception as e:

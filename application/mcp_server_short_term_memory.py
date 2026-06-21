@@ -37,11 +37,7 @@ projectName = config['projectName']
 
 try:
     mcp = FastMCP(
-        name = "short-term memory",
-        instructions=(
-            "You are a helpful assistant. "
-            "You can create, retrieve, list, get, and delete memories."
-        ),
+        name = "short-term memory"
     )
     logger.info("MCP server initialized successfully")
 except Exception as e:
