@@ -7,6 +7,7 @@ import uuid
 import base64
 import info 
 import utils
+import bedrock_data_retention
 import langgraph_agent
 import mcp_config
 import csv
@@ -84,7 +85,7 @@ doc_prefix = "docs/"
 
 MSG_LENGTH = 100    
 
-model_name = "Claude 4 Sonnet"
+model_name = "Claude 5.0 Sonnet"
 model_type = "claude"
 models = info.get_model_info(model_name)
 number_of_models = len(models)
@@ -173,8 +174,77 @@ def save_chat_history(text, msg):
             memory_chain.chat_memory.add_ai_message(msg) 
 
 selected_chat = 0
+
+
+def is_fable_model(model_id: str | None = None) -> bool:
+    if not model_id:
+        if not models:
+            return False
+        model_id = models[selected_chat].get("model_id", "")
+    return "fable" in model_id.lower()
+
+
+def uses_adaptive_thinking(model_id: str | None = None) -> bool:
+    if not model_id:
+        if not models:
+            return False
+        model_id = models[selected_chat].get("model_id", "")
+    model_id = model_id.lower()
+    return "fable" in model_id or "claude-sonnet-5" in model_id
+
+
+def sanitize_messages_for_bedrock(messages: list) -> list:
+    """Remove thinking blocks that cannot be replayed to Bedrock on later turns."""
+    sanitized = []
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            sanitized.append(msg)
+            continue
+
+        content = msg.content
+        if not isinstance(content, list):
+            sanitized.append(msg)
+            continue
+
+        cleaned = [
+            block for block in content
+            if not (isinstance(block, dict) and block.get("type") == "thinking")
+        ]
+        if not cleaned:
+            cleaned = ""
+        elif (
+            len(cleaned) == 1
+            and isinstance(cleaned[0], dict)
+            and cleaned[0].get("type") == "text"
+        ):
+            cleaned = cleaned[0].get("text", "")
+
+        sanitized.append(
+            AIMessage(
+                content=cleaned,
+                tool_calls=getattr(msg, "tool_calls", None) or [],
+                additional_kwargs=getattr(msg, "additional_kwargs", {}),
+                response_metadata=getattr(msg, "response_metadata", {}),
+                id=getattr(msg, "id", None),
+            )
+        )
+    return sanitized
+
+
 def get_max_output_tokens(model_id: str = "") -> int:
     """Return the max output tokens based on the model ID."""
+    if is_fable_model(model_id):
+        return 128000
+    if "claude-sonnet-5" in model_id:
+        return 128000
+    if "claude-opus-4-6" in model_id:
+        return 128000
+    if "claude-opus-4-5" in model_id:
+        return 64000
+    if "claude-opus-4" in model_id or "claude-4-opus" in model_id:
+        return 32000
+    if "claude-sonnet-4" in model_id or "claude-4-sonnet" in model_id or "claude-haiku-4" in model_id:
+        return 64000
     if "claude-4" in model_id or "claude-sonnet-4" in model_id or "claude-opus-4" in model_id or "claude-haiku-4" in model_id:
         return 16384
     return 8192
@@ -199,6 +269,12 @@ def get_chat(extended_thinking):
 
     logger.info(f"LLM: {selected_chat}, bedrock_region: {bedrock_region}, modelId: {modelId}, model_type: {model_type}")
 
+    if is_fable_model(modelId):
+        bedrock_data_retention.ensure_fable_data_retention(
+            modelId,
+            bedrock_region=bedrock_region,
+        )
+
     if profile['model_type'] == 'nova':
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
     elif profile['model_type'] == 'claude':
@@ -218,7 +294,7 @@ def get_chat(extended_thinking):
         )
     )
 
-    if profile['model_type'] != 'openai' and extended_thinking=='Enable':
+    if profile['model_type'] != 'openai' and extended_thinking=='Enable' and not uses_adaptive_thinking(modelId):
         maxReasoningOutputTokens=64000
         logger.info(f"extended_thinking: {extended_thinking}")
         thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
@@ -235,9 +311,15 @@ def get_chat(extended_thinking):
     elif profile['model_type'] != 'openai' and extended_thinking=='Disable':
         parameters = {
             "max_tokens":maxOutputTokens,     
-            "temperature":0.1,
-            "top_k":250,
             "stop_sequences": [STOP_SEQUENCE]
+        }
+        if not is_fable_model(modelId):
+            parameters["temperature"] = 0.1
+            parameters["top_k"] = 250
+    elif profile['model_type'] != 'openai' and uses_adaptive_thinking(modelId):
+        parameters = {
+            "max_tokens": maxOutputTokens,
+            "stop_sequences": [STOP_SEQUENCE],
         }
     elif profile['model_type'] == 'openai':
         parameters = {
