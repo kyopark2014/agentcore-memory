@@ -975,11 +975,11 @@ def initiate_memory():
         # create memory if not exists
         if memory_id is None:
             logger.info(f"Memory will be created...")
-            memory_id = agentcore_memory.create_memory(namespace, actor_id)
+            memory_id = agentcore_memory.create_memory()
             logger.info(f"Memory was created... {memory_id}")
         
         # create strategy if not exists
-        agentcore_memory.create_strategy_if_not_exists(memory_id=memory_id, namespace=namespace, strategy_name=actor_id)
+        agentcore_memory.create_strategy_if_not_exists(memory_id)
 
         # save memory variables
         agentcore_memory.update_memory_variables(

@@ -66,63 +66,6 @@ def attach_inline_policy(iam_client, role_name: str, policy_name: str, policy_do
         raise
 
 
-def create_agentcore_memory_role(iam_client, proj_name: str, rgn: str) -> str:
-    """Create AgentCore Memory IAM role."""
-    logger.info("Creating AgentCore Memory IAM role...")
-    role_name = f"role-agentcore-memory-for-{proj_name}-{rgn}"
-
-    assume_role_policy = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Principal": {
-                    "Service": "bedrock-agentcore.amazonaws.com"
-                },
-                "Action": "sts:AssumeRole",
-            }
-        ],
-    }
-
-    role_arn = create_iam_role(iam_client, role_name, assume_role_policy)
-
-    memory_policy = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeModelWithResponseStream",
-                    "bedrock:ListMemories",
-                    "bedrock:CreateMemory",
-                    "bedrock:DeleteMemory",
-                    "bedrock:DescribeMemory",
-                    "bedrock:UpdateMemory",
-                    "bedrock:ListMemoryRecords",
-                    "bedrock:CreateMemoryRecord",
-                    "bedrock:DeleteMemoryRecord",
-                    "bedrock:DescribeMemoryRecord",
-                    "bedrock:UpdateMemoryRecord",
-                ],
-                "Resource": [
-                    "arn:aws:bedrock:*::foundation-model/*",
-                    "arn:aws:bedrock:*:*:inference-profile/*",
-                ],
-            }
-        ],
-    }
-
-    attach_inline_policy(
-        iam_client,
-        role_name,
-        f"agentcore-memory-policy-for-{proj_name}",
-        memory_policy,
-    )
-
-    return role_arn
-
-
 USER_PREFERENCE_PROMPT = (
     "You are tasked with analyzing conversations to extract the user's preferences. You'll be analyzing two sets of data:\n"
     "<past_conversation>\n"
@@ -140,46 +83,124 @@ USER_PREFERENCE_PROMPT = (
 )
 
 
-def create_agentcore_memory(rgn: str, proj_name: str, role_arn: str, user_id: str = "installer") -> str:
-    """Create AgentCore Memory with custom strategy."""
-    logger.info("Creating AgentCore Memory...")
+SUMMARY_PROMPT = (
+    "You will be given a text block and a list of summaries you previously generated when available.\n"
+    "<task>\n"
+    "- When the previously generated is not available, your goal is to summarize the given text block.\n"
+    "- When there is existing summary, your goal is to extend summary by taking into account the given text block.\n"
+    "- If there are queries/topics specified in the text block, your generated summary need to cover those queries/topics.\n"
+    "- If there are instructions in the text block **guiding you how to generate summary**, you MUST follow them.\n"
+    "</task>\n"
+    "Use Korean.\n"
+)
 
-    memory_client = MemoryClient(region_name=rgn)
-    memory_name = proj_name.replace("-", "_")
-    namespace = f"/users/{user_id}"
+SEMANTIC_PROMPT = (
+    "You are a long-term memory extraction agent supporting a lifelong learning system.\n"
+    "Your task is to identify and extract meaningful information about the users from a given list of messages.\n"
+    "Analyze the conversation and extract structured information about the user according to the schema below.\n"
+    "Only include details that are explicitly stated or can be logically inferred from the conversation.\n"
+    "- Extract information ONLY from the user messages. You should use assistant messages only as supporting context.\n"
+    "- If the conversation contains no relevant or noteworthy information, return an empty list.\n"
+    "- Do NOT extract anything from prior conversation history, even if provided. Use it solely for context.\n"
+    "- Do NOT incorporate external knowledge.\n"
+    "- Avoid duplicate extractions.\n"
+    "Use Korean.\n"
+)
 
-    # Check if memory already exists
-    memories = memory_client.list_memories()
-    for memory in memories:
-        if memory.get("id", "").split("-")[0] == memory_name:
-            memory_id = memory.get("id")
-            logger.info(f"Memory already exists: {memory_id}")
-            return memory_id
+SEMANTIC_CONSOLIDATION_PROMPT = (
+    "You consolidate newly extracted facts with existing long-term semantic memories.\n"
+    "- Merge duplicates; keep the most specific and recent facts.\n"
+    "- Do not invent facts that were not extracted.\n"
+    "- Prefer clear, atomic statements in Korean.\n"
+    "Use Korean.\n"
+)
 
-    result = memory_client.create_memory_and_wait(
-        name=memory_name,
-        description=f"Memory for {proj_name}",
-        event_expiry_days=365,
-        strategies=[{
+MEMORY_EXTRACTION_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def _shared_memory_strategies() -> list:
+    """UserPreference + Summary + Semantic (one of each kind per memory_id)."""
+    return [
+        {
             "customMemoryStrategy": {
-                "name": user_id,
-                "namespaces": [namespace],
+                "name": "UserPreference",
+                "namespaces": ["/users/{actorId}/preferences"],
                 "configuration": {
                     "userPreferenceOverride": {
                         "extraction": {
-                            "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                            "modelId": MEMORY_EXTRACTION_MODEL_ID,
                             "appendToPrompt": USER_PREFERENCE_PROMPT,
                         }
                     }
                 },
             }
-        }],
+        },
+        {
+            "customMemoryStrategy": {
+                "name": "Summary",
+                "namespaces": ["/users/{actorId}/sessions/{sessionId}"],
+                "configuration": {
+                    "summaryOverride": {
+                        "consolidation": {
+                            "modelId": MEMORY_EXTRACTION_MODEL_ID,
+                            "appendToPrompt": SUMMARY_PROMPT,
+                        }
+                    }
+                },
+            }
+        },
+        {
+            "customMemoryStrategy": {
+                "name": "Semantic",
+                "namespaces": ["/users/{actorId}/facts"],
+                "configuration": {
+                    "semanticOverride": {
+                        "extraction": {
+                            "modelId": MEMORY_EXTRACTION_MODEL_ID,
+                            "appendToPrompt": SEMANTIC_PROMPT,
+                        },
+                        "consolidation": {
+                            "modelId": MEMORY_EXTRACTION_MODEL_ID,
+                            "appendToPrompt": SEMANTIC_CONSOLIDATION_PROMPT,
+                        },
+                    }
+                },
+            }
+        },
+    ]
+
+
+def create_agentcore_memory(role_arn: str, user_id: str = "installer") -> str:
+    """
+    Create AgentCore Memory with shared UserPreference / Summary / Semantic strategies.
+
+    user_id is unused for strategy naming — kept for call-site compatibility.
+    User isolation uses {actorId}/{sessionId} namespace templates from CreateEvent.
+    """
+    logger.info("[2/10] Creating AgentCore Memory")
+
+    memory_client = MemoryClient(region_name=region)
+    memory_name = project_name.replace("-", "_")
+
+    memories = memory_client.list_memories()
+    for memory in memories:
+        if memory.get("id", "").split("-")[0] == memory_name:
+            memory_id = memory.get("id")
+            logger.info(f"  Memory already exists: {memory_id}")
+            return memory_id
+
+    strategies = _shared_memory_strategies()
+    result = memory_client.create_memory_and_wait(
+        name=memory_name,
+        description=f"Memory for {project_name}",
+        event_expiry_days=365,
+        strategies=strategies,
         memory_execution_role_arn=role_arn,
     )
     memory_id = result.get("id")
-    logger.info(f"Memory created: {memory_id}")
+    names = [s["customMemoryStrategy"]["name"] for s in strategies]
+    logger.info(f"  ✓ Memory created: {memory_id} (strategies={names})")
     return memory_id
-
 
 def save_config(config_path: str, config_data: Dict):
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
