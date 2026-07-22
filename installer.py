@@ -9,6 +9,7 @@ AgentCore Memory Installer
 import boto3
 import json
 import os
+import time
 import logging
 import argparse
 from typing import Dict, Optional
@@ -170,6 +171,72 @@ def _shared_memory_strategies() -> list:
     ]
 
 
+def create_agentcore_memory_role(iam_client, proj_name: str, rgn: str) -> str:
+    """Create AgentCore Memory IAM role."""
+    logger.info("[2/10] Creating AgentCore Memory IAM role")
+    account_id = boto3.client("sts", region_name=rgn).get_caller_identity()["Account"]
+    role_name = f"role-agentcore-memory-for-{proj_name}-{rgn}"
+
+    # Trust must include aws:SourceAccount / aws:SourceArn; CreateMemory rejects otherwise.
+    # https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/long-term-configuring-custom-strategies.html
+    assume_role_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "MemoryAssumeRolePolicy",
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "bedrock-agentcore.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {
+                        "aws:SourceAccount": account_id
+                    },
+                    "ArnLike": {
+                        "aws:SourceArn": (
+                            f"arn:aws:bedrock-agentcore:{rgn}:{account_id}:*"
+                        )
+                    },
+                },
+            }
+        ],
+    }
+
+    role_arn = create_iam_role(iam_client, role_name, assume_role_policy)
+
+    memory_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                ],
+                "Resource": [
+                    "arn:aws:bedrock:*::foundation-model/*",
+                    "arn:aws:bedrock:*:*:inference-profile/*",
+                ],
+                "Condition": {
+                    "StringEquals": {
+                        "aws:ResourceAccount": account_id
+                    }
+                },
+            }
+        ],
+    }
+    attach_inline_policy(
+        iam_client, role_name, f"agentcore-memory-policy-for-{proj_name}", memory_policy
+    )
+
+    # IAM eventual consistency: CreateMemory validates trust immediately after role create/update
+    logger.info("  Waiting for IAM role trust policy to propagate...")
+    time.sleep(10)
+
+    return role_arn
+
+
 def create_agentcore_memory(role_arn: str, user_id: str = "installer") -> str:
     """
     Create AgentCore Memory with shared UserPreference / Summary / Semantic strategies.
@@ -222,6 +289,8 @@ def save_config(config_path: str, config_data: Dict):
 
 
 def main():
+    global project_name, region
+
     parser = argparse.ArgumentParser(description="AgentCore Memory Installer")
     parser.add_argument("--project-name", default=project_name, help="Project name (default: %(default)s)")
     parser.add_argument("--region", default=region, help="AWS region (default: %(default)s)")
@@ -229,6 +298,9 @@ def main():
 
     proj_name = args.project_name
     rgn = args.region
+
+    project_name = proj_name
+    region = rgn
 
     logger.info("=" * 60)
     logger.info("AgentCore Memory Installer")
@@ -245,7 +317,7 @@ def main():
     logger.info(f"AgentCore Memory Role ARN: {agentcore_memory_role_arn}")
 
     # 2. Create AgentCore Memory
-    memory_id = create_agentcore_memory(rgn, proj_name, agentcore_memory_role_arn)
+    memory_id = create_agentcore_memory(agentcore_memory_role_arn)
     logger.info(f"Memory ID: {memory_id}")
 
     # 3. Generate application/config.json
