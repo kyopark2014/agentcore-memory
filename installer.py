@@ -34,7 +34,8 @@ def get_aws_clients(region_name: str):
     return iam, account_id
 
 
-def create_iam_role(iam_client, role_name: str, assume_role_policy: Dict) -> str:
+def create_iam_role(iam_client, role_name: str, assume_role_policy: Dict):
+    """Returns (role_arn, created)."""
     try:
         response = iam_client.create_role(
             RoleName=role_name,
@@ -43,13 +44,13 @@ def create_iam_role(iam_client, role_name: str, assume_role_policy: Dict) -> str
         )
         role_arn = response["Role"]["Arn"]
         logger.info(f"IAM role created: {role_name}")
-        return role_arn
+        return role_arn, True
 
     except ClientError as e:
         if e.response["Error"]["Code"] == "EntityAlreadyExists":
             logger.warning(f"IAM role already exists: {role_name}")
             response = iam_client.get_role(RoleName=role_name)
-            return response["Role"]["Arn"]
+            return response["Role"]["Arn"], False
         logger.error(f"Failed to create IAM role {role_name}: {e}")
         raise
 
@@ -203,7 +204,7 @@ def create_agentcore_memory_role(iam_client, proj_name: str, rgn: str) -> str:
         ],
     }
 
-    role_arn = create_iam_role(iam_client, role_name, assume_role_policy)
+    role_arn, role_created = create_iam_role(iam_client, role_name, assume_role_policy)
 
     memory_policy = {
         "Version": "2012-10-17",
@@ -230,9 +231,12 @@ def create_agentcore_memory_role(iam_client, proj_name: str, rgn: str) -> str:
         iam_client, role_name, f"agentcore-memory-policy-for-{proj_name}", memory_policy
     )
 
-    # IAM eventual consistency: CreateMemory validates trust immediately after role create/update
-    logger.info("  Waiting for IAM role trust policy to propagate...")
-    time.sleep(10)
+    # CreateMemory validates trust immediately after a brand-new role.
+    if role_created:
+        logger.info("  Waiting for IAM role trust policy to propagate...")
+        time.sleep(10)
+    else:
+        logger.info("  Skipping IAM wait (memory role already exists)")
 
     return role_arn
 
