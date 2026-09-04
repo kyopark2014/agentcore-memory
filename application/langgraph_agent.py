@@ -16,7 +16,7 @@ from langgraph.graph.message import add_messages
 from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMessageChunk
 from langchain_core.messages.base import BaseMessage, BaseMessageChunk
-from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain.mcp import MCPAdapter
 from pytz import timezone
 from langchain_core.tools import tool
 
@@ -765,14 +765,15 @@ def buildChatAgentWithHistory(tools):
 #  MCP Server Utilities
 # ═══════════════════════════════════════════════════════════════════
 def load_multiple_mcp_server_parameters(mcp_json: dict):
+    """Build per-server configs compatible with langchain.mcp.MCPAdapter / MCPConfig."""
     mcpServers = mcp_json.get("mcpServers")
 
     server_info = {}
     if mcpServers is not None:
         for server_name, cfg in mcpServers.items():
-            if cfg.get("type") in ("streamable_http", "http"):
+            if cfg.get("type") in ("streamable_http", "http", "streamable-http"):
                 server_info[server_name] = {
-                    "transport": "streamable_http",
+                    "transport": "http",
                     "url": cfg.get("url"),
                     "headers": cfg.get("headers", {})
                 }
@@ -802,11 +803,11 @@ async def run_langgraph_agent(query: str, mcp_servers: list, plugin_name: Option
     logger.info(f"server_params: {server_params}")    
 
     try:
-        client = MultiServerMCPClient(server_params)
-        logger.info(f"MCP client created successfully")
-        
-        tools.extend(await client.get_tools())        
-        # logger.info(f"get_tools() returned: {tools}")
+        for server_name, params in server_params.items():
+            async with MCPAdapter({"mcpServers": {server_name: params}}) as adapter:
+                logger.info(f"MCP client created successfully for server: {server_name}")
+                tools.extend(await adapter.list_tools())
+        # logger.info(f"list_tools() returned: {tools}")
 
         # builtin tools
         tools.extend(get_builtin_tools())
