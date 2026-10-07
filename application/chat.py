@@ -320,7 +320,7 @@ def get_chat(extended_thinking):
             "max_tokens":maxOutputTokens,     
             "stop_sequences": [STOP_SEQUENCE]
         }
-        if not is_fable_model(modelId):
+        if not uses_adaptive_thinking(modelId):
             parameters["temperature"] = 0.1
             parameters["top_k"] = 250
     elif profile['model_type'] != 'openai' and uses_adaptive_thinking(modelId):
